@@ -13,17 +13,17 @@ versión— en [ADR-041](https://github.com/ahincho/nova-shared-01-docs/blob/mai
 
 | Módulo | `groupId` | Qué es | Estado |
 |---|---|---|---|
-| `nova-idempotency` | `pe.edu.nova.java.libs` | el contrato, el núcleo y el almacén en memoria; Java puro, sin Spring ni ningún otro framework | fase 1, va en la 0.1.0 |
-| `nova-idempotency-jdbc` | `pe.edu.nova.java.libs` | el almacén para PostgreSQL, con JDBC puro | fase 1, va en la 0.1.0 |
-| `nova-idempotency-spring-boot-starter` | `pe.edu.nova.java.starters` | conecta la capacidad con Spring Boot y traduce las salidas del núcleo a HTTP | planificado, en la fase 2 |
+| `nova-idempotency` | `pe.edu.nova.java.libs` | el contrato, el núcleo y el almacén en memoria; Java puro, sin Spring ni ningún otro framework | publicado desde la 0.1.0 |
+| `nova-idempotency-jdbc` | `pe.edu.nova.java.libs` | el almacén para PostgreSQL, con JDBC puro | publicado desde la 0.1.0 |
+| `nova-idempotency-spring-boot-starter` | `pe.edu.nova.java.starters` | conecta la capacidad con Spring MVC: `@Idempotent`, `nova.idempotency.*` y los errores HTTP | fase 2, va en la 0.2.0 |
 
 Todos se publican en `https://maven.pkg.github.com/ahincho/nova-java-25-idempotency` con la misma
 versión.
 
 ## La primera versión es la 0.1.0
 
-La API todavía no tiene consumidor. La valida el servicio de pedidos de Plaza en la fase 2, y la 1.0.0
-llega entonces. Hasta ahí la capacidad se queda en 0.x, y un cambio de la API puede romper.
+La API todavía no tiene consumidor. La valida el servicio de pedidos de Plaza al migrar al starter, y la
+1.0.0 llega entonces. Hasta ahí la capacidad se queda en 0.x, y un cambio de la API puede romper.
 
 Release-please sale de 1.0.0 por defecto, así que `.release-please-config.json` fija `initial-version`
 en `0.1.0` y el manifest parte de `0.0.0`: el primer release sale como 0.1.0. Mientras la versión sea 0.x,
@@ -44,8 +44,8 @@ clave, el alcance y la huella de una petición, `IdempotencyEngine.begin` decide
 | `Decision.KeyMissing` | 400, `IDEMPOTENCY_KEY_REQUIRED` |
 | `Decision.KeyInvalid` | 400, `IDEMPOTENCY_KEY_INVALID` |
 
-La columna de HTTP es lo que traducirá el starter de la fase 2, con los errores de ADR-031. Hasta
-entonces, un servicio usa el núcleo directamente:
+La columna de HTTP es lo que traduce el starter, más abajo. Un servicio sin Spring usa el núcleo
+directamente:
 
 ```java
 IdempotencyStore store = JdbcIdempotencyStore.builder(dataSource).build();
@@ -80,7 +80,7 @@ el servicio se cierra el motor con `close()`.
 ## Los valores por defecto
 
 Todo se configura con `IdempotencySettings`. El núcleo no lee ninguna fuente de configuración: el starter
-leerá `nova.idempotency.*` y armará esa clase.
+lee `nova.idempotency.*` y arma esa clase.
 
 | Propiedad | Por defecto | Qué es |
 |---|---|---|
@@ -157,7 +157,7 @@ números escritos de una sola manera. Un cliente que reserializa el mismo JSON n
 
 `InMemoryIdempotencyStore` es para desarrollo y pruebas. **Se declara no persistente**
 (`persistent()` devuelve `false`): los registros se pierden al reiniciar y no los comparten las réplicas, así
-que en producción una operación puede ejecutarse dos veces. Por eso el starter se negará a arrancar con él,
+que en producción una operación puede ejecutarse dos veces. Por eso el starter se niega a arrancar con él,
 salvo que se pida a propósito con `nova.idempotency.store=memory`.
 
 ## El almacén JDBC
@@ -266,12 +266,106 @@ pierde lee la fila que encontró. `complete`, `renew` y `release` son un `UPDATE
 - **Un error de la base** dice qué operación falló y con qué SQLState, y **no encadena la `SQLException`**:
   el servidor cita la fila cuando una restricción se rompe, y la fila lleva la clave y el cuerpo.
 
-## Qué queda para la fase 2
+## El starter de Spring Boot
 
-El starter de Spring Boot: las propiedades `nova.idempotency.*`, `@Idempotent` por operación, el mapeo a
-HTTP con los errores de ADR-031 y el header `Idempotent-Replayed`, la negativa a arrancar sin un almacén
-persistente y sin un alcance, y la purga programada. Y su primer consumidor, el servicio de pedidos, que
-valida la API para la 1.0.0. Una extensión de Quarkus y un almacén Redis llegan con su primer consumidor.
+`nova-idempotency-spring-boot-starter` conecta la capacidad con Spring MVC, en Spring Boot 4.0. Trae el
+almacén JDBC y el sobre de errores de `nova-api-standard`. El driver lo pone el servicio.
+
+```kotlin
+dependencies {
+    implementation("pe.edu.nova.java.starters:nova-idempotency-spring-boot-starter:0.2.0")
+    runtimeOnly("org.postgresql:postgresql")
+}
+```
+
+Cada operación se protege a propósito, con `@Idempotent`. Puesta sobre la clase, la anotación vale para
+todas sus operaciones:
+
+```java
+@Idempotent
+@PostMapping("/v1/orders")
+ResponseEntity<OrderResponse> place(@RequestBody CreateOrderRequest request) { ... }
+```
+
+```yaml
+nova:
+  idempotency:
+    scope-header: X-Customer-Id   # de quién es la clave; sin esto, la identidad de Spring Security
+```
+
+Así responde:
+
+| Situación | Respuesta |
+|---|---|
+| Falta la clave | 400, `IDEMPOTENCY_KEY_REQUIRED` |
+| La clave no tiene entre 1 y 255 caracteres ASCII imprimibles | 400, `IDEMPOTENCY_KEY_INVALID` |
+| La misma clave sigue en curso | 409, `IDEMPOTENCY_KEY_IN_USE`, con `Retry-After` |
+| La misma clave llegó con otro contenido | 422, `IDEMPOTENCY_KEY_REUSED` |
+| La misma clave ya se respondió | la respuesta guardada, con `Idempotent-Replayed: true` |
+| Falta el header del alcance | 400, `BAD_REQUEST`, con el nombre del header |
+| No hay una identidad autenticada | 401, `UNAUTHORIZED` |
+| El almacén no responde | 503, `SERVICE_UNAVAILABLE` |
+
+Los errores salen en el sobre `ApiResponse` de la plataforma, con los mensajes en español y sin citar
+nunca la clave ni el cuerpo.
+
+### Cuándo no arranca
+
+- **Sin un almacén persistente.** Sin `nova.idempotency.store`, el starter usa el almacén JDBC con el
+  `DataSource` del servicio, y no arranca si no hay uno. La memoria se elige a propósito, con
+  `nova.idempotency.store=memory`.
+- **Sin un alcance.** Una clave nunca es global: hace falta `nova.idempotency.scope-header`, Spring
+  Security o un bean `ScopeResolver` propio.
+
+### En la misma transacción
+
+Con el almacén JDBC y un gestor de transacciones de Spring, que es el caso de un servicio con JPA o con
+JDBC, la operación corre dentro de una transacción que abre el starter. Los métodos `@Transactional` del
+servicio se suman a ella, y la respuesta se guarda antes del commit:
+
+- **Una respuesta 2xx o 4xx** se confirma en el mismo commit que el cambio del negocio. Si la operación se
+  confirmó, su respuesta está guardada.
+- **Un 5xx, una excepción o un error que escribe el contenedor con `sendError`** deshacen el cambio y
+  liberan la clave, y el cliente puede reintentar.
+- **Un error del negocio que Spring responde con un 4xx**, como un 409 por falta de stock, deshace el
+  cambio pero guarda la respuesta: el reintento recibe el mismo 409.
+- **El lock se toma antes de abrir la transacción**, así que un duplicado recibe el 409 enseguida, aunque
+  la primera petición siga dentro de su transacción.
+
+La transacción abarca la operación entera, así que una llamada a otro servicio dentro de ella retiene la
+conexión mientras espera. Se apaga con `nova.idempotency.same-transaction=false`: cada escritura del almacén
+se confirma sola, y una caída entre el commit del negocio y el registro de la respuesta puede ejecutar la
+operación otra vez.
+
+### Las propiedades
+
+Además de las de la tabla de valores por defecto:
+
+| Propiedad | Por defecto | Qué es |
+|---|---|---|
+| `nova.idempotency.enabled` | `true` | apaga el starter entero |
+| `nova.idempotency.store` | JDBC | `jdbc` o `memory` |
+| `nova.idempotency.scope-header` | ninguno | el header del alcance |
+| `nova.idempotency.table-name` | `idempotency_record` | la tabla del almacén JDBC |
+| `nova.idempotency.same-transaction` | `true` | si la respuesta se guarda en el commit de la operación |
+| `nova.idempotency.purge-interval` | 1 hora | cada cuánto se purgan los vencidos; `0` lo apaga |
+
+### Lo que se reemplaza
+
+Cada pieza es un bean con `@ConditionalOnMissingBean`, así que el servicio declara la suya y el starter la
+usa: `IdempotencyStore`, `ScopeResolver`, `Fingerprinter` y `IdempotencyErrorResponder`, que decide la forma
+de los errores. Un `JdbcIdempotencyStore` propio se suma a la transacción de Spring con
+`SpringConnectionProvider`.
+
+### Los límites
+
+- **Solo mira POST, PUT, PATCH y DELETE.** Una petición con otro método pasa sin tocarse.
+- **El cuerpo se lee entero en memoria** antes de la operación, para la huella, y la respuesta también,
+  para guardarla. Es para APIs JSON, no para subir archivos ni para respuestas en streaming.
+- **Un cuerpo de formulario** (`application/x-www-form-urlencoded`) no está soportado.
+- **La ruta de la huella lleva la query:** la misma clave con otra query es otro contenido.
+
+Una extensión de Quarkus y un almacén Redis llegan con su primer consumidor.
 
 ## Desarrollo
 
