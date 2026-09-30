@@ -19,3 +19,4 @@ pluginManagement {
 rootProject.name = "nova-idempotency"
 
 include("nova-idempotency")
+include("nova-idempotency-jdbc")
