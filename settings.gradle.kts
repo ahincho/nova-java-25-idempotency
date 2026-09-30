@@ -20,3 +20,4 @@ rootProject.name = "nova-idempotency"
 
 include("nova-idempotency")
 include("nova-idempotency-jdbc")
+include("nova-idempotency-spring-boot-starter")
