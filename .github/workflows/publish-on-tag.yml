@@ -1,0 +1,141 @@
+name: Publish on Tag
+
+on:
+  workflow_run:
+    workflows: ["Release Please"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect new release tag
+        id: detect
+        env:
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          LATEST_TAG=$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags/v\* 2>/dev/null | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::notice::No semver tag exists yet. Skipping publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::Latest tag $LATEST_TAG is not a valid semver. Skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG_VERSION="${LATEST_TAG#v}"
+          MANIFEST_VERSION=$(jq -r '."."' .release-please-manifest.json 2>/dev/null || echo "")
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::notice::Latest tag ($LATEST_TAG) does not match manifest ($MANIFEST_VERSION). No release was created in the triggering workflow_run. Skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "${WORKFLOW_RUN_HEAD_SHA}" ]; then
+            TAG_SHA=$(git rev-list -n 1 "${LATEST_TAG}" 2>/dev/null || echo "")
+            if [ "${TAG_SHA}" != "${WORKFLOW_RUN_HEAD_SHA}" ]; then
+              echo "::notice::Tag ${LATEST_TAG} (${TAG_SHA}) was NOT created in this workflow_run (head_sha=${WORKFLOW_RUN_HEAD_SHA}). Skipping."
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Tag ${LATEST_TAG} confirmed as new (matches workflow_run head_sha)."
+          else
+            echo "::warning::No workflow_run.head_sha available; relying solely on manifest match."
+          fi
+          echo "New release detected: $LATEST_TAG (manifest version matches: $MANIFEST_VERSION)"
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Make gradlew executable
+        if: steps.detect.outputs.should_publish == 'true'
+        run: chmod +x ./gradlew
+
+      - name: Validate tag format
+        if: steps.detect.outputs.should_publish == 'true'
+        run: |
+          TAG="${{ steps.detect.outputs.tag }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $TAG does not match vX.Y.Z format"
+            exit 1
+          fi
+          echo "Tag $TAG is valid semver"
+
+      - name: Sync version from tag to gradle.properties
+        if: steps.detect.outputs.should_publish == 'true'
+        run: |
+          TAG_VERSION="${{ steps.detect.outputs.tag }}"
+          VERSION="${TAG_VERSION#v}"
+          echo "Setting version=${VERSION} in gradle.properties"
+          sed -i "s/^version=.*/version=${VERSION}/" gradle.properties
+          cat gradle.properties
+
+      - name: Nova Setup Java
+        if: steps.detect.outputs.should_publish == 'true'
+        uses: ahincho/nova-shared-02-pipelines/.github/actions/nova-setup-java@main
+        with:
+          java-version: '25'
+          build-tool: gradle
+
+      - name: Resolve package visibility
+        if: steps.detect.outputs.should_publish == 'true'
+        id: visibility
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+          VAR_VISIBILITY: ${{ vars.NOVA_PACKAGE_VISIBILITY }}
+        run: |
+          if [ -n "${VAR_VISIBILITY}" ]; then
+            EFFECTIVE="${VAR_VISIBILITY}"
+          else
+            EFFECTIVE="public"
+          fi
+          echo "value=${EFFECTIVE}" >> "$GITHUB_OUTPUT"
+          echo "Effective visibility: ${EFFECTIVE}"
+
+      - name: Validate visibility compatibility
+        if: steps.detect.outputs.should_publish == 'true'
+        shell: bash
+        run: |
+          REPO_VIS="${{ github.event.repository.visibility }}"
+          PKG_VIS="${{ steps.visibility.outputs.value }}"
+          if [ "${REPO_VIS}" = "public" ] && [ "${PKG_VIS}" = "private" ]; then
+            echo "::error::Cannot publish private package from public repo"
+            exit 1
+          fi
+          if [ "${REPO_VIS}" = "private" ] && [ "${PKG_VIS}" = "public" ]; then
+            echo "::error::Cannot publish public package from private repo"
+            exit 1
+          fi
+          echo "Visibility validation OK"
+
+      - name: Publish to GitHub Packages
+        if: steps.detect.outputs.should_publish == 'true'
+        run: ./gradlew publish -Pvisibility=${{ steps.visibility.outputs.value }}
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Used only to READ internal Nova Platform dependencies published in other
+          # repos' GitHub Packages (GITHUB_TOKEN cannot read packages cross-repo).
+          # NOVA_RELEASE_PAT fallback was REMOVED in Phase 3; configure
+          # NOVA_PACKAGES_READ_TOKEN to preserve cross-repo reads.
+          NOVA_PACKAGES_READ_TOKEN: ${{ secrets.NOVA_PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Un publish en verde no prueba que los artefactos se puedan descargar (ADR-039, regla 6).
+      - name: Verify the publication can be downloaded
+        if: steps.detect.outputs.should_publish == 'true'
+        uses: ahincho/nova-shared-02-pipelines/.github/actions/nova-verify-publication@main
+        with:
+          group-id: pe.edu.nova.java.libs
+          artifact-ids: nova-idempotency nova-idempotency-jdbc
+          version: ${{ steps.detect.outputs.tag }}
+          token: ${{ github.token }}

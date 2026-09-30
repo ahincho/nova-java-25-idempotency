@@ -17,3 +17,6 @@ pluginManagement {
 
 // La familia de la capacidad de idempotencia (ADR-041): la raíz solo agrega módulos y no se publica.
 rootProject.name = "nova-idempotency"
+
+include("nova-idempotency")
+include("nova-idempotency-jdbc")
