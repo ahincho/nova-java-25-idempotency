@@ -139,3 +139,13 @@ jobs:
           artifact-ids: nova-idempotency nova-idempotency-jdbc
           version: ${{ steps.detect.outputs.tag }}
           token: ${{ github.token }}
+
+      # Los conectores publican con otro groupId (ADR-041), así que se verifican aparte.
+      - name: Verify the connectors can be downloaded
+        if: steps.detect.outputs.should_publish == 'true'
+        uses: ahincho/nova-shared-02-pipelines/.github/actions/nova-verify-publication@main
+        with:
+          group-id: pe.edu.nova.java.starters
+          artifact-ids: nova-idempotency-spring-boot-starter
+          version: ${{ steps.detect.outputs.tag }}
+          token: ${{ github.token }}
