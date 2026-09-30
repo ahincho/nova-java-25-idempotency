@@ -1,0 +1,20 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-release-please.yml@main
+    secrets:
+      # Solo GITHUB_TOKEN. El publish ahora triggerea via workflow_run (ver
+      # publish-on-tag.yml) en vez de push:tags, asi que NO necesitamos un
+      # PAT para evitar la restriction de GitHub "GITHUB_TOKEN no dispara
+      # workflows downstream". El auto-trigger del publish se preserva.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

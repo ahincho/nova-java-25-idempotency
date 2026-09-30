@@ -1,0 +1,78 @@
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+# El token de Actions de este repositorio es de solo lectura por defecto. Cada job pide lo que
+# necesita, en vez de heredar un permiso de escritura que casi ninguno usa.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name == 'pull_request'
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-build-gradle.yml@main
+    secrets: inherit
+
+  # Los mensajes de commit del PR, con el mismo validador que el hook local (ADR-044).
+  commit-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95  # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Validar los mensajes de commit del PR
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: ./gradlew novaCommitLint --from="$BASE" --to="$HEAD"
+
+  sonar:
+    if: github.event_name == 'pull_request'
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-sonarcloud-gradle.yml@main
+    with:
+      sonar-org: ahincho
+      sonar-project-key: ahincho_nova-idempotency
+    secrets: inherit
+
+  matrix:
+    if: github.event_name == 'pull_request'
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-build-matrix.yml@main
+    with:
+      build-tool: gradle
+    secrets: inherit
+
+  owasp:
+    if: github.event_name == 'pull_request'
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-owasp-check.yml@main
+    with:
+      build-tool: gradle
+    secrets: inherit
+
+  sbom:
+    if: github.event_name == 'pull_request'
+    # reusable-sbom.yml declara contents: write para adjuntar el SBOM a un release; sin este
+    # permiso el workflow entero no llega a arrancar.
+    permissions:
+      contents: write
+    uses: ahincho/nova-shared-02-pipelines/.github/workflows/reusable-sbom.yml@main
+    with:
+      build-tool: gradle
+    secrets: inherit
